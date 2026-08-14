@@ -120,13 +120,57 @@ the stable entry and resolve through its default version.
 
 ### Versions, defaults, and compatibility
 
-Each version stores its complete normalized manifest, unsupported-tool list,
-source, and active or inactive state. The stable parent entry records:
+The existing `MCPServerCatalogEntry` remains the stable parent and retains its
+current interface. It gains `spec.defaultVersion`, which selects the version
+used for new MCP servers and serves as the target for the existing diff/update
+flow. It also gains `status.latestVersion`, which lets the UI indicate when a
+newer version is available. The existing `spec.manifest` remains as a copy of
+the default version's manifest for existing clients.
 
-- `latestVersion`: the highest active published version;
-- `defaultVersion`: the installation's target for new stable connections and
-  deployment updates; and
-- a compatibility projection of the default manifest for existing API readers.
+A new `MCPServerCatalogEntryVersion` resource stores each complete versioned
+definition read from the catalog source. The resource layout changes as
+follows:
+
+```text
+Before
+MCPServerCatalogEntry
+├── metadata.name                  # stable resource identity
+├── spec.mcpCatalogName
+├── spec.manifest
+├── spec.sourceURL
+├── spec.editable / spec.detached
+├── spec.powerUserWorkspaceID
+└── status.*                       # existing usage, drift, and OAuth state
+
+After
+MCPServerCatalogEntry
+├── metadata.name                  # unchanged stable identity
+├── spec.mcpCatalogName            # unchanged parent metadata
+├── spec.sourceURL                 # unchanged parent metadata
+├── spec.editable / spec.detached  # unchanged parent behavior
+├── spec.powerUserWorkspaceID      # unchanged ownership
+├── spec.defaultVersion            # selected update and connection target
+├── spec.manifest                  # copy of default version for existing clients
+├── status.latestVersion           # greatest active published version
+└── status.*                       # other existing status remains unchanged
+
+MCPServerCatalogEntryVersion  # one independent child per version
+├── spec.mcpServerCatalogEntryName
+├── spec.version
+├── spec.manifest
+├── spec.sourceURL
+└── spec.active
+
+MCPServer
+├── spec.mcpServerCatalogEntryName
+└── spec.mcpServerCatalogEntryVersion  # version last applied
+```
+
+Migration creates a version `0` child from each existing entry's definition
+without changing the parent's identity. Version children are siblings
+identified by parent entry and version number; they do not point to previous or
+next versions. Listing versions queries children by
+`mcpServerCatalogEntryName` rather than traversing a chain.
 
 A new installation initially selects the latest active version. Later catalog
 synchronization may advance `latestVersion` but preserves the installation's
@@ -242,7 +286,7 @@ cases where safe renaming, rather than version adoption, is the only need.
 ## Rollout and migration
 
 1. Add the version resource, version fields, version-aware resolution, and the
-   compatibility projection.
+   default-version copies retained on the parent for existing clients.
 2. Migrate current entries and deployments to version `0` without changing IDs,
    URLs, manifests, or behavior.
 3. Add synchronization, target-content consistency checks, exact-version
