@@ -263,20 +263,17 @@ rollback targets.
 
 Known risks are:
 
-- Older Obot releases use permissive YAML decoding and ignore the new `version`
+- **Older Obot releases use permissive YAML decoding and ignore the new `version`
   field. If their catalog source publishes multiple manifests with the same
   identity, they interpret them as duplicate unversioned entries, which can
   collide or expose one definition without version-aware adoption controls.
-  Multi-version catalogs must therefore have a minimum compatible Obot version.
-- Mutable versions are not historical proof. The deployment's stored manifest,
-  not its version number, remains the authoritative applied configuration.
-- Apply-then-configure can leave a deployment unavailable after a version adds
-  required configuration. Preflight is separate follow-up work.
+  Multi-version catalogs must therefore have a minimum compatible Obot version.**
+- The deployment's stored manifest, not its version number, remains the authoritative
+  applied configuration.
 - Rollback across runtime or authentication models cannot restore lost runtime
   data and may require new authorization.
 - Catalog review must prevent unrelated integrations from sharing a version
   family merely to avoid creating a new entry.
-- Existing API clients see only the projected default, not version history.
 - Changing a component's default must not mutate existing deployed composites.
 
 Open questions for review are whether the operational lifecycle justifies the
