@@ -174,6 +174,18 @@ identity. Version children are siblings identified by parent entry and version
 number; they do not point to previous or next versions. Listing versions
 queries children by `mcpServerCatalogEntryName` rather than traversing a chain.
 
+Synchronization validates a complete version family, then publishes it in two
+fail-fast phases: first apply and verify all version children, then apply the
+parent. The parent phase does not run if a child fails. Children reference the
+deterministic parent name and do not require the parent to exist first. This
+makes the parent the publication point and enforces the invariant that every
+discoverable entry resolves its default version. A failed parent write may
+leave undiscoverable children, which the next synchronization retries.
+
+For an existing entry, synchronization stores the child before advancing
+`latestVersion` and leaves `defaultVersion` unchanged. Migration similarly
+creates version `1` before updating parent and deployment references.
+
 A new installation initially selects the latest active version. Later catalog
 synchronization may advance `latestVersion` but preserves the installation's
 default while it remains active. Existing deployments also retain their copied
