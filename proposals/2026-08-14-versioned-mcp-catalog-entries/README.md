@@ -112,7 +112,8 @@ runtime: remote
 
 The shared `name` and `entryKey` define the version family. Version numbers are
 monotonically increasing release labels, not semantic versions or immutable
-content identifiers. Legacy unversioned manifests become version `0`.
+content identifiers. Legacy unversioned manifests become version `1`; version
+`0` remains reserved for unset or not-yet-migrated references.
 
 Synchronization rejects duplicate version numbers or manifests in a family
 that disagree on `name` or `entryKey`. Composite references continue to target
@@ -166,11 +167,12 @@ MCPServer
 └── spec.mcpServerCatalogEntryVersion  # version last applied
 ```
 
-Migration creates a version `0` child from each existing entry's definition
-without changing the parent's identity. Version children are siblings
-identified by parent entry and version number; they do not point to previous or
-next versions. Listing versions queries children by
-`mcpServerCatalogEntryName` rather than traversing a chain.
+Migration creates a version `1` child from each existing entry's definition,
+sets it as the parent's default, and records version `1` on existing
+catalog-derived deployments without changing their manifests or the parent's
+identity. Version children are siblings identified by parent entry and version
+number; they do not point to previous or next versions. Listing versions
+queries children by `mcpServerCatalogEntryName` rather than traversing a chain.
 
 A new installation initially selects the latest active version. Later catalog
 synchronization may advance `latestVersion` but preserves the installation's
@@ -261,6 +263,11 @@ rollback targets.
 
 Known risks are:
 
+- Older Obot releases use permissive YAML decoding and ignore the new `version`
+  field. If their catalog source publishes multiple manifests with the same
+  identity, they interpret them as duplicate unversioned entries, which can
+  collide or expose one definition without version-aware adoption controls.
+  Multi-version catalogs must therefore have a minimum compatible Obot version.
 - Mutable versions are not historical proof. The deployment's stored manifest,
   not its version number, remains the authoritative applied configuration.
 - Apply-then-configure can leave a deployment unavailable after a version adds
@@ -273,22 +280,31 @@ Known risks are:
 - Changing a component's default must not mutate existing deployed composites.
 
 Open questions for review are whether the operational lifecycle justifies the
-implementation cost and whether `displayName` should be added independently for
-cases where safe renaming, rather than version adoption, is the only need.
+implementation cost, whether `displayName` should be added independently for
+cases where safe renaming is the only need, and whether incompatible Obot
+installations should be excluded through a minimum supported version or remain
+on a separate legacy catalog source.
 
 ## Rollout and migration
 
 1. Add the version resource, version fields, version-aware resolution, and the
-   default-version copies retained on the parent for existing clients.
-2. Migrate current entries and deployments to version `0` without changing IDs,
-   URLs, manifests, or behavior.
+   default-version copies retained on the parent for existing clients. Keep the
+   shared catalog source unversioned during this phase; version-aware Obot maps
+   those manifests to version `1`.
+2. Migrate current entries and deployments to version `1` without changing IDs,
+   URLs, manifests, or behavior. This explicitly writes the applied version
+   rather than relying on an integer field's zero value.
 3. Add synchronization, target-content consistency checks, exact-version
    testing, default selection, target-aware diffs, and per-deployment and bulk
    updates.
-4. Pilot with Context7: retain the local implementation as version `0`, publish
-   the hosted implementation as version `1`, evaluate it, promote it, and
+4. Before publishing multiple versions, establish a compatibility boundary:
+   either all supported Obot releases understand version families, or upgraded
+   installations move to a versioned catalog source while the legacy source
+   remains unchanged for older installations.
+5. Pilot with Context7: retain the local implementation as version `1`, publish
+   the hosted implementation as version `2`, evaluate it, promote it, and
    explicitly migrate deployments.
-5. Extend the model after the pilot validates configuration and OAuth changes,
+6. Extend the model after the pilot validates configuration and OAuth changes,
    partial failures, cleanup, and rollback.
 
 Before promotion, removing a candidate has no user impact. After promotion,
@@ -296,8 +312,11 @@ rollback uses an earlier active default and the same explicit update flow.
 
 ## Testing and validation
 
-- Unversioned entries migrate to version `0` without changing identity, URL,
-  configuration, or behavior.
+- Unversioned entries and their deployments migrate to version `1` without
+  changing identity, URL, configuration, or behavior.
+- An older Obot release continues to consume the unchanged legacy catalog, and
+  no default source exposes multiple same-identity manifests to an incompatible
+  release.
 - Publishing advances `latestVersion` without changing an existing default or
   deployment; new installations initially select the latest active version.
 - Promotion changes new stable connections and causes differing deployments to
