@@ -183,13 +183,14 @@ discoverable entry resolves its default version. A failed parent write may
 leave undiscoverable children, which the next synchronization retries.
 
 For an existing entry, synchronization stores the child before advancing
-`latestVersion` and leaves `defaultVersion` unchanged. Migration similarly
-creates version `1` before updating parent and deployment references.
+`latestVersion` and leaves `defaultVersion` unchanged unless the source also
+withdraws the default; that case follows the cleanup rules below. Migration
+similarly creates version `1` before updating parent and deployment references.
 
 A new installation initially selects the latest active version. Later catalog
-synchronization may advance `latestVersion` but preserves the installation's
-default while it remains active. Existing deployments also retain their copied
-manifests and record the version last applied to them.
+synchronization may advance `latestVersion` without changing the installation's
+default. Existing deployments also retain their copied manifests and record the
+version last applied to them.
 
 Publishers may correct an existing version in place; they should use a new
 number when a change needs a separate evaluation and adoption cycle. Existing
@@ -228,10 +229,14 @@ default selection, and rollout status are administrative concerns.
 
 ### Withdrawal and cleanup
 
-Only active versions can be tested, selected as the default, or used as update
-targets. A withdrawn version remains inactive while a deployment references it
-and is deleted once it is neither referenced nor the default. A temporary
-catalog synchronization failure must not deactivate or delete versions.
+When a source replaces version `1` with version `2`:
+
+- If version `1` is unused, delete it and make version `2` the default.
+- If version `1` is deployed, it becomes "detached" but remains the default until an
+  administrator promotes version `2`. It remains in the detached state.
+
+This behavior is consistent with the current behavior for git-synced catalog deletes:
+unused entries are immediately deleted, while in-use entries become "detached".
 
 ## Alternatives considered
 
