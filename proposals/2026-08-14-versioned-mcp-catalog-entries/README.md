@@ -1,7 +1,7 @@
-# 0001: Versioned MCP catalog entries
+# Versioned MCP catalog entries
 
 - **Authors:** @calvinmclean
-- **Created:** 2026-08-13
+- **Created:** 2026-08-14
 
 ## Summary
 
@@ -213,13 +213,6 @@ Normal users continue to see one catalog card. Version history, testing,
 default selection, and rollout status are administrative concerns.
 
 ### Withdrawal and cleanup
-
-```mermaid
-stateDiagram-v2
-    [*] --> Active: published
-    Active --> Inactive: withdrawn while referenced
-    Inactive --> Deleted: not default and unreferenced
-```
 
 Only active versions can be tested, selected as the default, or used as update
 targets. A withdrawn version remains inactive while a deployment references it
