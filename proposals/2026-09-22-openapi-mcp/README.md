@@ -7,9 +7,11 @@
 
 Let catalog authors upload an OpenAPI specification or provide its URL to create
 an MCP catalog entry. Run a reusable FastMCP container that converts the API to
-MCP using FastMCP's OpenAPI integration, based on the existing Python example.
+MCP using FastMCP's OpenAPI integration.
 The wrapper source and container build live in `mcp-images`.
-Users configure API keys or OAuth and compose the entry into a vMCP.
+Users configure API keys and compose the entry into a vMCP. Obot supplies keys
+in per-request headers so a hosted container can serve multiple users. OAuth is
+not supported in the initial implementation.
 
 Configuration allows users to enable FastMCP Tool Search and, only when search
 is enabled, supply basic rules that disable tools inside FastMCP. Without Tool
@@ -39,35 +41,58 @@ reuse these features through its existing hosted-MCP paths.
 
 - Create catalog entries from uploaded or linked specifications.
 - Use a shared container image, configured per API, with no per-API code generation.
-- Support API keys, OAuth, and vMCP composition.
+- Support unauthenticated APIs, header-based API keys, and vMCP composition.
 - Make Tool Search configurable and allow FastMCP exclusions only in search mode.
 - Keep running entries stable until an explicit upgrade.
 
 ## Non-goals
 
-Custom search/HTTP execution engines or full OpenAPI compatibility in the first
-release.
+OAuth, query-parameter or cookie authentication, custom search/HTTP execution
+engines, or full OpenAPI compatibility in the first release.
 
 ## Context and constraints
 
-The local Python example uses FastMCP's OpenAPI integration to generate direct
-tools and can replace their listing with BM25 Tool Search. Both direct calls and
-search followed by invocation have passed live tests. Authentication and
-container deployment still need implementation.
+FastMCP's OpenAPI integration generates tools and their input schemas and
+executes HTTP requests. Its BM25 search transform can replace the direct tool
+listing with search and invocation tools. The wrapper supplies per-request
+credentials through the HTTP client used by those tools.
 
 The production image must pin and test its dependencies rather than assume
 every valid specification is supported.
 
 ## Proposed design
 
-### Container and catalog setup
+### Creating catalog entries
+
+- **UI:** select **Hosted**, then the new **OpenAPI** runtime. Upload an OpenAPI
+  file or provide a specification URL. These are mutually exclusive sources.
+- **API destination:** show the base URL resolved from the specification and
+  allow an explicit `baseURL` override. Require an override if the specification
+  has no usable server URL. The override controls API requests, not where Obot
+  fetches the specification, and applies consistently to generated operations.
+- **Options:** define sensitive API-key header inputs by name,
+  Tool Search, and exclusions when search is enabled. Preview generated tools
+  and report unsupported features before saving the entry.
+- **GitOps:** add a catalog entry with runtime `openapi` and equivalent settings.
+  Proposed source fields are either an inline specification document or a URL;
+  inline content is the GitOps equivalent of an uploaded file. Include the
+  optional `baseURL`, header definitions, Tool Search, and exclusions in the
+  definition, but never secret values. Exact field names remain for review.
+
+Both paths use the same import validation and store the actual specification
+internally in Obot, not just its URL or declared version. The new OpenAPI runtime is a catalog configuration option
+backed by the existing container deployment infrastructure, not a new hosting
+backend. Authors do not need to configure a container image or command.
+
+### Container setup
 
 Keep the Python wrapper, dependencies, tests, and Dockerfile in `mcp-images` so
 the image can be built directly from that repository. Package it in one reusable
-image. Each deployment receives the
-specification, API base URL, authentication configuration, Tool Search setting,
-and any permitted exclusion rules. FastMCP exposes Streamable HTTP for Obot to
-connect to through its existing containerized runtime.
+image. Each deployment receives the specification, API base URL, allowed
+credential header names, Tool Search setting, and any permitted exclusion rules. API credentials
+arrive separately on each request, not in container environment variables.
+FastMCP exposes Streamable HTTP for Obot to connect to through its existing
+container deployment infrastructure.
 
 ```text
 MCP client → Obot gateway / vMCP → FastMCP container → REST API
@@ -77,10 +102,31 @@ Obot owns catalog setup, deployment, connections, and gateway access controls.
 FastMCP owns OpenAPI conversion, tool schemas, search, and HTTP request execution.
 No new protocol translation handler is needed inside Obot.
 
-Import previews generated tools and reports unsupported features. Store a
-versioned copy of the specification; a linked URL is its refresh source.
-Review specification and configuration changes through the vMCP upgrade flow.
-A failed import must not replace a working revision.
+### Updates and refresh
+
+Obot stores schema content internally for both catalog entries and deployed
+vMCP snapshots. API version fields and source URLs are not reliable change
+indicators; use the stored content for normal drift detection and upgrade review.
+
+- **UI-managed entries:** replace an uploaded file or use Refresh to fetch a
+  linked specification again. Validate and save the schema content in Obot.
+- **GitOps:** every catalog sync imports the schema, fetching linked URLs again
+  even when the Git revision, URL, and declared API version are unchanged.
+  Inline schemas are also imported on every sync. No refresh marker is needed.
+  Git-managed definitions remain read-only in the UI.
+- **Failures and unchanged content:** report fetch or validation errors and
+  retain the last working schema. Identical content creates no new drift.
+  Refresh preserves an explicit base URL override.
+- **Drift review:** normal drift detection compares the latest stored catalog
+  schema with the deployed vMCP component snapshot. Show a diff of the actual
+  API schema in the UI, not just a URL, version, digest, or generated tool list.
+  Include configuration changes and flag destination or credential-header
+  changes so users can decide whether to update the MCP server.
+- **Server upgrades:** syncing a catalog does not update a deployed MCP server.
+  Apply schema and configuration changes only through an explicit vMCP upgrade.
+  Container restarts use the stored snapshot, never the latest source URL.
+  Rollback restores schema and configuration together. Refresh does not rebuild
+  the shared image.
 
 ### Tool Search and filtering
 
@@ -93,22 +139,47 @@ Enable search using FastMCP's BM25 search transform. It returns matching tool
 definitions and input schemas, and call_tool invokes a discovered tool. Use the
 library's implementation rather than adding custom general tools.
 
-Expose a small declarative set of exclusion rules using FastMCP's OpenAPI route
-mapping, such as HTTP method, path pattern, and tag. The exact rule fields are
-proposed for review. Rules only disable matching operations; they do not run
-user-provided Python or enable excluded tools. Apply exclusions when creating
+Support exclusion rules only, using FastMCP's OpenAPI route mapping. Rules match
+HTTP methods, regular expressions against OpenAPI paths, and operation tags.
+Do not support include rules or user-provided Python. Apply exclusions when creating
 the OpenAPI tools, before applying Tool Search.
 
-For example, a proposed configuration could be:
+The proposed configuration schema is:
 
 ```yaml
 toolSearch: true
 exclude:
-  - methods: [DELETE]
+  - method: DELETE
   - pathPattern: "^/admin/"
+  - tag: internal
 ```
 
-These field names are illustrative, not a finalized catalog schema.
+`exclude` is a list of rules with only these optional fields:
+
+- `method`: an uppercase HTTP method.
+- `pathPattern`: a regular expression matched against the OpenAPI path
+  template, not the full URL or substituted parameter values.
+- `tag`: an exact, case-sensitive OpenAPI operation tag name. An operation
+  matches if it has that tag.
+
+Each rule must contain at least one nonempty string field. When multiple fields
+are present, all must match. An operation is excluded if any rule matches; use
+separate entries for alternatives rather than lists within a rule. Reject
+unknown fields, non-string or empty values, and invalid regular expressions.
+The configuration above excludes all DELETE operations
+as well as operations whose paths start with `/admin/` or have the `internal` tag.
+
+To exclude only `POST /users`, combine the method and an exact-path regex in
+one rule:
+
+```yaml
+toolSearch: true
+exclude:
+  - method: POST
+    pathPattern: "^/users$"
+```
+
+This leaves `GET /users` and POST operations on other paths available.
 
 Validate the combination in both Obot and the container: nonempty exclusions
 with search disabled are an error, not silently ignored. The UI only offers
@@ -127,28 +198,45 @@ Tool Search hides direct tools from listing but keeps them callable. Excluded
 operations must instead be unavailable through search, call_tool, and direct
 calls by name. Verify this behavior against the pinned FastMCP release.
 
-### Authentication
+### Authentication and multi-user deployments
 
-Keep the client's Obot credentials separate from upstream API credentials.
-Support API-key injection and OAuth, following existing connection ownership
-rules for per-user and explicitly shared credentials. Secrets must not appear in
-specifications, tool arguments, descriptions, or results.
-
-API keys use the configured header, query parameter, or cookie. OAuth requires
-client setup, consent, token storage, refresh, and reconnect behavior; merely
-supplying a bearer token is insufficient. The division of this work between
-Obot and the container needs review. Do not assume existing MCP OAuth handling
-automatically supplies REST-provider tokens.
-
-Credential or filter differences must be reflected in deployment/connection
-isolation so users cannot inherit another connection's access.
+- **Credential ownership:** use Obot's per-user header configuration, not
+  container environment variables. The catalog defines a sensitive header input
+  and the vMCP author marks it user allowed. Obot stores each user's value in
+  their instance credential and injects it into requests to the container.
+  Reuse Obot's existing header prefix configuration: for example, define
+  `Authorization` with prefix `Bearer ` and let the user supply just the key.
+  Obot applies the prefix using its existing header handling before sending
+  the request to the container; no separate credential mapping is needed.
+- **Header forwarding:** read only the explicitly configured credential headers
+  from the current MCP request and send the same names and values to the target
+  API, including any prefix already applied by Obot. Do not rename headers,
+  add the prefix again, transform values, or convert credentials to query
+  parameters or cookies. Direct tools and call_tool use the same path.
+- **Isolation:** never mutate shared HTTP-client headers or reuse another
+  request's credential. Reject missing required keys. Do not forward arbitrary
+  client headers or Obot's login token. Send API credentials only to the
+  configured destination, never to specification sources or unrelated redirects.
+  Keep secrets out of specifications, tool arguments, descriptions, results,
+  and logs.
+- **Shared deployments:** user-allowed headers permit a shared vMCP component;
+  user-allowed non-header inputs or forceSingleUser require dedicated runtimes.
+  Specification, allowed credential header names, search, and exclusions remain fixed for a
+  shared component. Different runtime settings need separate components or
+  deployments.
+- **Future OAuth:** not supported initially. Obot's managed MCP OAuth flow is
+  currently remote-only. Per-request credentials prepare for Obot-owned OAuth
+  to the target API: Obot would obtain, store, and refresh access tokens and
+  supply them through this header path, leaving the wrapper without OAuth state.
+  That flow requires separate design and implementation; accepting bearer
+  credentials alone does not provide OAuth login or refresh.
 
 ### Failures and operations
 
 Use the existing hosted-MCP lifecycle for startup, health, restart, and shutdown.
 Validate configuration before serving requests. Bound parsing, HTTP requests,
 concurrency, and response sizes; return useful tool errors for upstream failures.
-Apply network policy to specification/reference loading, OAuth, and API requests,
+Apply network policy to specification/reference loading and API requests,
 including redirects. Containerization does not remove these requirements.
 
 Keep existing gateway auditing and secret redaction. In search mode, ordinary
@@ -159,10 +247,14 @@ routing rather than treating a container as a solution to session state.
 
 ## Alternatives considered
 
-- **Generate or hand-write each MCP:** allows tailored tools but adds maintenance
-  and per-API builds.
-- **vMCP filtering alone in search mode:** cannot select individual operations
-  behind a single call_tool. FastMCP must exclude them before invocation.
+- **Build our own Go-based conversion layer:** gives us direct control over
+  OpenAPI parsing, tool generation, and HTTP execution, but requires maintaining
+  that conversion and search behavior ourselves. The proposed design reuses
+  FastMCP's existing implementations which are robust and industry-tested.
+- **Handle OpenAPI APIs directly in Obot, similar to remote MCP servers:** keeps
+  execution inside Obot, but REST APIs cannot use the remote MCP proxy path
+  unchanged. Obot would need to own MCP-to-HTTP translation. The proposed design
+  keeps that work in a reusable wrapper hosted through the container runtime.
 
 ## Trade-offs
 
@@ -173,36 +265,33 @@ Search reduces the advertised tool list but moves operation filtering into
 container configuration. Direct mode keeps familiar vMCP tool selection and
 avoids a second filtering configuration.
 
-## Risks and open questions
-
-Resolve during review:
-
-- Should Tool Search be enabled by default? Which exclusion matchers ship first?
-- How are specification content and configuration passed to the container?
-- Which API authentication flows are supported first, and who owns OAuth refresh?
-- How do existing deployment-sharing rules account for credentials and exclusions?
-- How do auditing, hooks, and approvals handle call_tool targets?
-- Which OpenAPI features, resource limits, and session behaviors are supported?
-
 ## Rollout and migration
 
 Introduce the container image and catalog creation flow without changing existing
-entries. Validate unauthenticated APIs, then API keys and OAuth. No automatic
+entries. Validate unauthenticated APIs, then API keys. No automatic
 migration is needed. Pin image and specification revisions and use explicit
 upgrades. Reverting a deployment must restore its filtering configuration too;
 never fall back to an unfiltered server after a configuration error.
 
 ## Testing and validation
 
-Verify the image builds directly from `mcp-images`. Test container startup and
-real MCP calls through Obot and a vMCP in both modes.
-Without search, verify direct tool restrictions are enforced by vMCP and
-FastMCP exclusions are rejected. With search, verify excluded operations cannot
-be found or called by either invocation path.
-
-Cover invalid rules, mode changes, isolated configurations, credential refresh,
-secret redaction, upstream errors, session routing, and failed upgrades. Use
-local APIs for repeatable tests and a public API for optional live smoke tests.
+- Verify Hosted/OpenAPI creation through the UI and equivalent GitOps imports,
+  source validation, and base URL overrides.
+- Cover replacement uploads, URL refresh, unchanged content, and fetch failures.
+  Verify every GitOps sync imports the schema, including changes at the same URL
+  with unchanged Git and API versions.
+- Confirm drift displays the actual schema diff, existing vMCPs stay pinned
+  until upgrade, and restarts use stored schemas without fetching the source.
+- Without search, verify vMCP enforces direct tool restrictions and FastMCP
+  exclusions are rejected. With search, verify excluded operations cannot be
+  found or called through either invocation path.
+- Test concurrent users with different keys through one shared container in
+  both modes. Verify each API request uses the correct credential and missing
+  keys cannot reuse another user's key.
+- Cover Obot's existing prefix behavior, including headers without a prefix
+  and avoiding duplicate prefixes for values that already contain one.
+- Use local APIs for repeatable tests and a public API for optional live smoke
+  tests.
 
 ## References
 
