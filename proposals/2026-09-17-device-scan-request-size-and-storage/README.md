@@ -65,8 +65,9 @@ scan is the latest attempt but must not replace the last usable inventory.
   a scan record.
 - A single collection, especially files, may itself exceed a request limit.
   Sending one request per collection is therefore not sufficient; a collection
-  must be divisible across bounded requests. A single captured file may contain
-  up to 1 MiB of text, so a file may also need to be split.
+  must be divisible across requests. Sentry already omits content for files
+  over 1 MiB while retaining their path, size, and oversized status. Readable
+  text files within that limit can keep their content.
 - HTTP chunked transfer and a multipart body are still one request and remain
   subject to aggregate request limits. This design requires multiple HTTP
   requests.
@@ -123,12 +124,15 @@ per-request and aggregate scan limits. The whole-scan cap defaults to 64 MiB of
 decoded data and is configurable by the operator. A scan that exceeds its
 configured cap fails with its received portions visible in history.
 
-Sentry divides the uncompressed scan into parts targeting at most 512 KiB
-before independently compressing each request. This leaves room below Nginx's
-default 1 MiB compressed-body limit, but cannot guarantee acceptance by every
-proxy. Obot enforces per-request limits on both compressed and decoded bodies.
-A retry of an acknowledged part must have the same content; a changed part
-with the same identity is rejected.
+Sentry groups observations into parts targeting at most 512 KiB before
+independently compressing each request. A captured file stays intact: if it
+does not fit alongside other observations, Sentry sends it in its own part,
+which may exceed that target. Existing per-file capture limits remain
+unchanged. Compression may bring a near-1 MiB file below Nginx's default 1 MiB
+compressed-body limit, but acceptance by that or another proxy is not
+guaranteed. Obot enforces per-request limits on both compressed and decoded
+bodies. A retry of an acknowledged part must have the same content; a changed
+part with the same identity is rejected.
 
 Sentry may resume a pending scan after a transient failure by resending only
 unacknowledged parts. Obot allows one pending scan per device; starting a new
@@ -205,6 +209,8 @@ not yet been assessed.
   of one-request limits, at the cost of pending state, finalization, and cleanup.
 - Aligning parts with logical scan collections keeps the interface small while
   allowing any large collection to be divided further.
+- Keeping files intact avoids file-chunk reassembly but leaves a near-limit
+  captured file vulnerable to a proxy's lower per-request limit.
 - Atomic finalization prevents partial fleet inventory; failed uploads still
   show their received portions in scan history.
 - Idempotent parts make retries safe but require stable scan and part identity.
@@ -248,8 +254,8 @@ timeout and remain visible in scan history without affecting fleet inventory.
 - Verify a complete large scan can be submitted through individually bounded
   requests.
 - Verify duplicate, reordered, interrupted, and resumed part submission.
-- Verify a changed retry cannot replace an acknowledged part, and a single
-  large file can be divided into bounded parts before submission.
+- Verify a changed retry cannot replace an acknowledged part, and a captured
+  file too large for the target part size is sent intact in its own part.
 - Verify a 413 fails the attempt with a safe request-too-large reason, retains
   acknowledged portions in history, and does not trigger repartitioning.
 - Verify missing or invalid parts prevent finalization and never affect fleet
