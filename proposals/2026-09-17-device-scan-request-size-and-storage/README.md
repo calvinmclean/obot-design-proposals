@@ -6,12 +6,9 @@
 ## Summary
 
 Make device scan failures visible and allow scans that exceed a single-request
-limit to be submitted successfully.
-
-First, retry an oversized scan with bulky content omitted and record the
-failure when Obot still cannot accept it. Next, allow one scan to be submitted
-through multiple bounded requests and make it available only after the whole
-scan is complete.
+limit to be submitted successfully. Submit one scan through multiple bounded
+requests. Publish it to fleet inventory when complete; if the upload fails,
+show the received portions in scan history with a failure status.
 
 Fingerprinting raw content could later reduce repeated uploads and backend
 storage, but it does not solve the initial large upload. It is therefore an
@@ -38,19 +35,18 @@ plugin-cache data, dominated by raw file contents and repeated skill and plugin
 material. Compression can reduce bytes on the wire, but it does not guarantee
 that a scan will fit every request limit.
 
-Once truncated and failed scans are recorded, "latest scan" becomes ambiguous.
-A truncated scan is the latest usable inventory but must be identified as
-incomplete. A failed scan is the latest attempt but must not replace the last
-usable inventory.
+Once failed attempts are recorded, "latest scan" becomes ambiguous. A failed
+scan is the latest attempt but must not replace the last usable inventory.
 
 ## Goals
 
-- Make truncated and failed attempts visible to administrators when Obot is
+- Make pending and failed attempts visible to administrators when Obot is
   reachable.
 - Preserve the latest usable inventory when a newer attempt fails.
 - Accept a complete scan even when it cannot fit in one request.
 - Keep per-request and whole-scan resource usage bounded.
 - Prevent incomplete scans from appearing in inventory.
+- Preserve received portions of a failed upload in scan history.
 - Allow interrupted uploads to be retried without duplicating scan data.
 - Remain compatible with older Sentry clients during rollout.
 
@@ -73,9 +69,11 @@ usable inventory.
 - HTTP chunked transfer and a multipart body are still one request and remain
   subject to aggregate request limits. This design requires multiple HTTP
   requests.
+- Obot does not control the reverse proxy configuration in every deployment,
+  so increasing Obot's request limit alone cannot resolve all failures.
 - Every request must be authorized for the same device and Obot installation.
-- A sequence of individually valid requests must not bypass the maximum allowed
-  size for one completed scan.
+- The current single-request limit caps each submission. The multi-request
+  interface needs a separate whole-scan limit; its value is not yet decided.
 - Existing clients submit complete scans through the current endpoint and must
   continue to work during migration.
 
@@ -86,25 +84,14 @@ usable inventory.
 A scan attempt has one of three states:
 
 - **Pending:** Obot has accepted the start of a scan but not the complete scan.
-- **Successful:** Obot has accepted the complete scan. A successful scan may be
-  marked truncated when optional content was omitted.
-- **Failed:** Obot knows that the scan could not be completed.
+- **Successful:** Obot has accepted the complete scan.
+- **Failed:** The scan could not be completed. Any portions Obot received remain
+  available in scan history with the failure reason.
 
 Only successful scans are usable inventory. Fleet views use the latest
 successful scan for each device. Device and history views also show the latest
-attempt so a newer pending or failed attempt is not hidden by older inventory.
-
-### Immediate failure handling
-
-Continue accepting complete scans through the existing endpoint. If a scan is
-rejected as too large, Sentry makes one retry without bulky optional content
-and marks an accepted result as truncated.
-
-If Obot still cannot accept the scan, Sentry makes one best-effort request with
-the device identity, scan timing, and a sanitized failure reason. Other
-submission failures may use the same failure report when the server is
-reachable. A failure report does not replace the last successful inventory and
-does not recursively retry itself.
+attempt and any received portions, so a newer failed attempt is visible without
+replacing older usable inventory.
 
 ### Multi-request scan submission
 
@@ -128,19 +115,24 @@ unacknowledged parts. Concurrent scans from one device use different scan IDs
 and cannot append to or finalize each other.
 
 Sentry reports a failed attempt when it abandons a pending scan after a
-non-recoverable error. Obot expires abandoned pending scans after a bounded
-period, records them as failed attempts, and removes their partial data. An
-expired or failed scan ID cannot later be finalized.
+non-recoverable error. Obot changes pending scans to failed after a period
+without progress, recording an upload timeout as the reason. Received portions
+remain visible in scan history until the failed scan reaches its retention
+limit. A failed scan ID cannot later be finalized.
+
+If submission fails before Obot creates a pending scan, Sentry makes a
+best-effort, small failure report when the server is reachable. Failed attempts
+never replace the last successful inventory.
 
 ### Observability
 
-Operators can distinguish pending, successful, truncated, failed, and expired
-attempts. Operational measurements include request and aggregate scan sizes,
-part retries, completion time, and expiration counts without logging raw scan
-content.
+Operators can distinguish pending, successful, and failed attempts, including
+failures caused by an upload timeout. Operational measurements include request
+and aggregate scan sizes, part retries, completion time, and timeout counts
+without logging raw scan content.
 
-Whether aggregate product telemetry should report failed or truncated scans
-remains a separate decision subject to the product-telemetry consent model.
+Whether aggregate product telemetry should report failed scans remains a
+separate decision subject to the product-telemetry consent model.
 
 ## Alternatives considered
 
@@ -164,11 +156,12 @@ is a smaller protocol change but remains dependent on every proxy in the path,
 increases resource exposure, and provides no reliable upper bound on future
 scan growth.
 
-### Truncated retry only
+### Retry without bulky content
 
-Use only the immediate fallback. This restores useful inventory and failure
-visibility with limited change, but it intentionally loses raw content and
-does not allow a complete first scan when that content is required.
+After a size rejection, retry a smaller scan that omits optional raw content.
+This could provide quicker relief, but adds a second, incomplete scan format
+that would remain after multi-request submission is available. It also does not
+meet the goal of accepting a complete scan.
 
 ### Never collect raw content
 
@@ -182,8 +175,8 @@ not yet been assessed.
   of one-request limits, at the cost of pending state, finalization, and cleanup.
 - Aligning parts with logical scan collections keeps the interface small while
   allowing any large collection to be divided further.
-- Atomic finalization prevents partial inventory but delays visibility until
-  the last part is accepted.
+- Atomic finalization prevents partial fleet inventory; failed uploads still
+  show their received portions in scan history.
 - Idempotent parts make retries safe but require stable scan and part identity.
 - This design improves submission reliability but does not reduce repeated
   backend storage; fingerprinting remains a separate possible optimization.
@@ -196,10 +189,12 @@ not yet been assessed.
   finalization can prove that every expected part was received.
 - **Part sizing:** Decide whether Sentry chooses part sizes proactively or adapts
   after a request is rejected by a deployment-specific proxy.
+- **Whole-scan limit:** Set a maximum aggregate scan size before implementation;
+  no separate limit exists for a multi-request scan today.
 - **Pending lifetime:** Choose an expiration period long enough for resume but
-  short enough to bound partial storage.
-- **Failure status:** Decide how long pending and failed attempts remain visible
-  relative to successful scan retention.
+  short enough to bound pending storage. Expiration changes pending to failed.
+- **Failure retention:** Decide how long failed attempts and their received
+  portions remain visible relative to successful scan retention.
 - **Raw-content requirement:** Determine whether raw file content is required
   product data, optional diagnostic data, or data Obot should not retain.
 - **Production distribution:** Measure which collections dominate affected
@@ -210,20 +205,19 @@ not yet been assessed.
 
 ## Rollout and migration
 
-1. Add attempt status, truncated retry, failure reporting, and administrator
-   visibility while retaining the existing complete-scan endpoint.
-2. Add multi-request submission alongside the existing endpoint. Older clients
-   continue submitting complete scans as successful attempts.
-3. Enable multi-request submission in newer Sentry clients and fall back to the
-   existing endpoint when connected to an older Obot server.
-4. Monitor completion, retry, expiration, and aggregate size before making the
-   multi-request interface the preferred submission path.
-5. Evaluate fingerprinted raw content separately using measured backend storage
+1. Add attempt status, failure reporting, administrator visibility, and the
+   multi-request interface while retaining the existing complete-scan endpoint.
+   Older clients continue submitting complete scans as successful attempts.
+2. Enable multi-request submission in newer Sentry clients. When connected to
+   an older Obot server, they use the existing endpoint; large scans can still
+   fail until that server is upgraded.
+3. Monitor completion, retries, expiration, and aggregate scan size. Evaluate
+   fingerprinted raw content separately using measured backend storage
    duplication and the configured scan-retention window.
 
 Rollback disables the new client path and leaves the existing endpoint
-available. Pending scans created before rollback expire without affecting
-inventory.
+available. Pending scans created before rollback become failed after their
+timeout and remain visible in scan history without affecting fleet inventory.
 
 ## Testing and validation
 
@@ -237,10 +231,12 @@ inventory.
 - Verify per-request and aggregate limits, including a large files collection
   split across several requests.
 - Verify concurrent scans from one device cannot modify each other.
-- Verify abandoned scans expire, remove partial data, and appear as failed
-  attempts without replacing the latest successful inventory.
-- Verify a truncated retry is marked incomplete and a failure report is bounded
-  and sanitized.
+- Verify abandoned scans transition from pending to failed after the timeout,
+  retain received portions in history, and do not replace the latest successful
+  inventory.
+- Verify failed portions are removed when their scan history retention expires.
+- Verify failure reports are bounded and sanitized, including failures before
+  a pending scan is created.
 - Verify old and new Sentry clients remain compatible during rollout and
   rollback.
 
