@@ -65,17 +65,28 @@ scan is the latest attempt but must not replace the last usable inventory.
   a scan record.
 - A single collection, especially files, may itself exceed a request limit.
   Sending one request per collection is therefore not sufficient; a collection
-  must be divisible across bounded requests.
+  must be divisible across bounded requests. A single captured file may contain
+  up to 1 MiB of text, so a file may also need to be split.
 - HTTP chunked transfer and a multipart body are still one request and remain
   subject to aggregate request limits. This design requires multiple HTTP
   requests.
 - Obot does not control the reverse proxy configuration in every deployment,
   so increasing Obot's request limit alone cannot resolve all failures.
+- Obot currently limits both the compressed request body and its decoded
+  content to 8 MiB per request. A proxy can impose a lower limit on the
+  compressed body before the request reaches Obot.
 - Every request must be authorized for the same device and Obot installation.
-- The current single-request limit caps each submission. The multi-request
-  interface needs a separate whole-scan limit; its value is not yet decided.
+- The current single-request limit caps each submission. A multi-request scan
+  needs its own aggregate limit; the reported 9.9 MB scan is the only detailed
+  size example available so far.
 - Existing clients submit complete scans through the current endpoint and must
   continue to work during migration.
+- Skill and plugin detail views display captured file content. This proposal
+  preserves that content in complete scans; changing collection policy is a
+  separate product decision.
+- Existing scan history defaults to 90 days of retention; setting retention to
+  zero disables automatic cleanup. Failed attempts and their received portions
+  use the same policy.
 
 ## Proposed design
 
@@ -97,32 +108,51 @@ replacing older usable inventory.
 
 Add a scan-specific upload interface with three operations:
 
-1. **Start** creates a pending scan and returns its scan ID. The request
-   describes the collections that make up the scan so Obot can later determine
-   whether it is complete.
+1. **Start** creates a pending scan and returns its scan ID.
 2. **Append** submits a bounded part of one collection. Parts are independently
    retryable and idempotent, and collections may use as many parts as needed.
-3. **Finalize** validates the complete scan and changes it from pending to
-   successful. Until this succeeds, none of its observations appear in fleet
+3. **Finalize** declares the expected parts for each collection. Obot checks
+   that every declared part was received, including an explicit empty result
+   for collections with no observations, before changing the scan from pending
+   to successful. Until then, none of its observations appear in fleet
    inventory.
 
 The interface exposes logical scan collections rather than database tables.
 Obot remains responsible for how parts are persisted and for enforcing both
-per-request and aggregate scan limits.
+per-request and aggregate scan limits. The whole-scan cap defaults to 64 MiB of
+decoded data and is configurable by the operator. A scan that exceeds its
+configured cap fails with its received portions visible in history.
+
+Sentry divides the uncompressed scan into parts targeting at most 512 KiB
+before independently compressing each request. This leaves room below Nginx's
+default 1 MiB compressed-body limit, but cannot guarantee acceptance by every
+proxy. Obot enforces per-request limits on both compressed and decoded bodies.
+A retry of an acknowledged part must have the same content; a changed part
+with the same identity is rejected.
 
 Sentry may resume a pending scan after a transient failure by resending only
-unacknowledged parts. Concurrent scans from one device use different scan IDs
-and cannot append to or finalize each other.
+unacknowledged parts. Obot allows one pending scan per device; starting a new
+scan for that device marks the earlier pending scan as failed with a superseded
+reason. Distinct scan IDs prevent parts from one attempt changing another.
 
-Sentry reports a failed attempt when it abandons a pending scan after a
-non-recoverable error. Obot changes pending scans to failed after a period
-without progress, recording an upload timeout as the reason. Received portions
-remain visible in scan history until the failed scan reaches its retention
-limit. A failed scan ID cannot later be finalized.
+On HTTP 413, Sentry does not resize or retry the rejected part; it reports a
+request-too-large failure for the attempt through a small, best-effort status
+request. Sentry likewise reports other non-recoverable errors when it abandons
+a pending scan. If the failure report cannot reach Obot, Obot changes the
+pending scan to failed after 24 hours without a successful append, recording
+an upload timeout as the reason. A failed scan ID cannot later be finalized.
+
+Received portions remain visible with the failed attempt until normal
+scan-history retention deletes both. At the proposed 64 MiB cap and default
+90-day retention, one near-limit failure per day could retain about 5.6 GiB of
+partial data per device. This is a capacity bound, not a production estimate;
+operators can change or disable scan-history cleanup.
 
 If submission fails before Obot creates a pending scan, Sentry makes a
 best-effort, small failure report when the server is reachable. Failed attempts
-never replace the last successful inventory.
+never replace the last successful inventory. Failure reports use a bounded
+reason category and safe message, without raw proxy responses or local file
+paths.
 
 ### Observability
 
@@ -178,6 +208,8 @@ not yet been assessed.
 - Atomic finalization prevents partial fleet inventory; failed uploads still
   show their received portions in scan history.
 - Idempotent parts make retries safe but require stable scan and part identity.
+- One pending scan per device bounds unfinished storage but means a newer attempt
+  ends an older unfinished upload.
 - This design improves submission reliability but does not reduce repeated
   backend storage; fingerprinting remains a separate possible optimization.
 - Separating latest attempt from latest successful scan makes failures visible,
@@ -185,23 +217,13 @@ not yet been assessed.
 
 ## Risks and open questions
 
-- **Completeness contract:** Decide what the start request must declare so
-  finalization can prove that every expected part was received.
-- **Part sizing:** Decide whether Sentry chooses part sizes proactively or adapts
-  after a request is rejected by a deployment-specific proxy.
-- **Whole-scan limit:** Set a maximum aggregate scan size before implementation;
-  no separate limit exists for a multi-request scan today.
-- **Pending lifetime:** Choose an expiration period long enough for resume but
-  short enough to bound pending storage. Expiration changes pending to failed.
-- **Failure retention:** Decide how long failed attempts and their received
-  portions remain visible relative to successful scan retention.
-- **Raw-content requirement:** Determine whether raw file content is required
-  product data, optional diagnostic data, or data Obot should not retain.
-- **Production distribution:** Measure which collections dominate affected
-  scans and the limits at each rejecting layer.
-- **Failure privacy:** Define sanitization so attempt errors help administrators
-  without persisting local paths, content, credentials, or proxy response
-  bodies.
+- **Capacity validation:** Validate the proposed 64 MiB whole-scan default,
+  24-hour inactivity timeout, and storage cost of retaining failed portions
+  for the configured scan-history period against representative scans and
+  deployment budgets before release.
+- **Production distribution:** One reported 9.9 MB scan was dominated by file
+  content from the Codex plugin cache. Measure broader scan sizes and proxy
+  limits before treating it as representative.
 
 ## Rollout and migration
 
@@ -226,15 +248,22 @@ timeout and remain visible in scan history without affecting fleet inventory.
 - Verify a complete large scan can be submitted through individually bounded
   requests.
 - Verify duplicate, reordered, interrupted, and resumed part submission.
+- Verify a changed retry cannot replace an acknowledged part, and a single
+  large file can be divided into bounded parts before submission.
+- Verify a 413 fails the attempt with a safe request-too-large reason, retains
+  acknowledged portions in history, and does not trigger repartitioning.
 - Verify missing or invalid parts prevent finalization and never affect fleet
   inventory.
-- Verify per-request and aggregate limits, including a large files collection
-  split across several requests.
-- Verify concurrent scans from one device cannot modify each other.
+- Verify per-request and aggregate limits, including a non-default operator
+  cap and a large files collection split across several requests.
+- Verify starting a new scan for a device fails its earlier pending attempt and
+  that parts cannot cross scan IDs.
 - Verify abandoned scans transition from pending to failed after the timeout,
   retain received portions in history, and do not replace the latest successful
   inventory.
-- Verify failed portions are removed when their scan history retention expires.
+- Verify failed portions and their failure status are removed together when
+  configured scan-history retention expires, and both remain when cleanup is
+  disabled.
 - Verify failure reports are bounded and sanitized, including failures before
   a pending scan is created.
 - Verify old and new Sentry clients remain compatible during rollout and
@@ -243,6 +272,7 @@ timeout and remain visible in scan history without affecting fleet inventory.
 ## References
 
 - [Issue #7506 and production payload breakdown](https://github.com/obot-platform/obot/issues/7506)
+- [Nginx `client_max_body_size` documentation](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size)
 - Existing Obot scan model: `pkg/gateway/types/devicescan.go`
 - Existing Obot scan persistence: `pkg/gateway/client/devicescan.go`
 - Existing Obot scan ingest: `pkg/api/handlers/devicescans.go`
