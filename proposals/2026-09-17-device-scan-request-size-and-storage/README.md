@@ -190,6 +190,26 @@ is a smaller protocol change but remains dependent on every proxy in the path,
 increases resource exposure, and provides no reliable upper bound on future
 scan growth.
 
+### gRPC streaming
+
+Send a scan through one client-streaming gRPC call. This offers flow control
+and avoids repeated request setup, but the stream is still one HTTP/2 request
+subject to proxy body limits. Protobuf would reduce some metadata overhead,
+not the captured file content that dominates large scans. Supporting gRPC
+through deployment proxies and resuming interrupted streams would add
+complexity without resolving the reported size rejection.
+
+### WebSocket upload
+
+After a WebSocket upgrade, scan data is tunneled rather than sent as an HTTP
+request body. This could avoid a proxy's body limit, including for an intact
+near-1 MiB file. It would still need bounded messages, acknowledgments, and
+resume after disconnection, while depending on WebSocket support and long-lived
+connections across deployments. For the reported scan size, this added
+transport and operational complexity is not justified over a few dozen HTTP
+requests that can reuse a connection. Reconsider it if single-file parts
+commonly fail at deployment proxy limits.
+
 ### Retry without bulky content
 
 After a size rejection, retry a smaller scan that omits optional raw content.
@@ -279,6 +299,8 @@ timeout and remain visible in scan history without affecting fleet inventory.
 
 - [Issue #7506 and production payload breakdown](https://github.com/obot-platform/obot/issues/7506)
 - [Nginx `client_max_body_size` documentation](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_max_body_size)
+- [gRPC over HTTP/2](https://grpc.io/blog/grpc-on-http2/)
+- [Nginx WebSocket proxying](https://nginx.org/en/docs/http/websocket.html)
 - Existing Obot scan model: `pkg/gateway/types/devicescan.go`
 - Existing Obot scan persistence: `pkg/gateway/client/devicescan.go`
 - Existing Obot scan ingest: `pkg/api/handlers/devicescans.go`
