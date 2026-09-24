@@ -116,15 +116,16 @@ defaults to 64 MiB of decoded data and is configurable by the operator. A scan
 that exceeds its configured cap fails with its received portions visible in
 history.
 
-Sentry groups observations into parts targeting at most 512 KiB before
-independently compressing each request. A captured file stays intact: if it
-does not fit alongside other observations, Sentry sends it in its own part,
-which may exceed that target. Existing per-file capture limits remain
-unchanged. Compression may bring a near-1 MiB file below Nginx's default 1 MiB
-compressed-body limit, but acceptance by that or another proxy is not
-guaranteed. Obot enforces per-request limits on both compressed and decoded
-bodies. A retry of an acknowledged part must have the same content; a changed
-part with the same identity is rejected.
+Sentry groups observations into parts targeting at most 896 KiB of uncompressed
+request data, then compresses each request. This leaves some room below Nginx's
+default 1 MiB compressed-body limit even if compression saves little. A
+captured file stays intact: if it does not fit alongside other observations,
+Sentry sends it in its own part, which may exceed that target. Existing
+per-file capture limits remain unchanged. Proxy acceptance is not guaranteed,
+especially for a near-1 MiB file or a deployment with a lower limit. Obot
+enforces per-request limits on both compressed and decoded bodies. A retry of
+an acknowledged part must have the same content; a changed part with the same
+identity is rejected.
 
 Sentry may resume a pending scan after a transient failure by resending only
 unacknowledged parts. Obot allows one pending scan per device; starting a new
