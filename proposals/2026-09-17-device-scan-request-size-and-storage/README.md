@@ -153,6 +153,12 @@ paths.
 
 ## Alternatives considered
 
+### Report failed scans only
+
+Keep single-request scans and report failed uploads separately. Administrators
+would see the failures, but large scans would still be rejected and leave
+inventory stale.
+
 ### Fingerprinted raw content
 
 Store raw content once under a fingerprint and let later scans refer to it.
