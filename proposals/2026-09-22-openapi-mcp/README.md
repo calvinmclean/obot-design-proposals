@@ -175,10 +175,13 @@ exclude:
 
 This leaves `GET /users` and POST operations on other paths available.
 
-Validate the combination in both Obot and the container: nonempty exclusions
-with search disabled are an error, not silently ignored. The UI only offers
-exclusions in search mode. Switching search off requires removing the rules and
-reviewing the resulting direct tools and vMCP selections.
+Obot validates the combination when saving configuration: nonempty exclusions
+with search disabled are an error, not silently ignored. The container also
+checks its received configuration at startup and refuses to serve if the
+combination is invalid; it does not participate in configuration-time
+validation. The UI only offers exclusions in search mode. Switching search off
+requires removing the rules and reviewing the resulting direct tools and vMCP
+selections.
 
 This distinction matters because vMCP sees individual operations without search,
 but sees only the search and invocation tools with search enabled. It cannot
