@@ -9,9 +9,8 @@ Let catalog authors upload an OpenAPI specification or provide its URL to create
 an MCP catalog entry. Run a reusable FastMCP container that converts the API to
 MCP using FastMCP's OpenAPI integration.
 The wrapper source and container build live in `mcp-images`.
-Users configure API keys and compose the entry into a vMCP. Obot supplies keys
-in per-request headers so a hosted container can serve multiple users. OAuth is
-not supported in the initial implementation.
+Users configure API keys and compose the entry into a vMCP. OAuth is not supported in
+the initial implementation.
 
 Configuration allows users to enable FastMCP Tool Search and, only when search
 is enabled, supply basic rules that disable tools inside FastMCP. Without Tool
@@ -122,11 +121,6 @@ indicators; use the stored content for normal drift detection and upgrade review
   API schema in the UI, not just a URL, version, digest, or generated tool list.
   Include configuration changes and flag destination or credential-header
   changes so users can decide whether to update the MCP server.
-- **Server upgrades:** syncing a catalog does not update a deployed MCP server.
-  Apply schema and configuration changes only through an explicit vMCP upgrade.
-  Container restarts use the stored snapshot, never the latest source URL.
-  Rollback restores schema and configuration together. Refresh does not rebuild
-  the shared image.
 
 ### Tool Search and filtering
 
@@ -200,19 +194,16 @@ calls by name. Verify this behavior against the pinned FastMCP release.
 
 ### Authentication and multi-user deployments
 
-- **Credential ownership:** use Obot's per-user header configuration, not
-  container environment variables. The catalog defines a sensitive header input
-  and the vMCP author marks it user allowed. Obot stores each user's value in
-  their instance credential and injects it into requests to the container.
-  Reuse Obot's existing header prefix configuration: for example, define
-  `Authorization` with prefix `Bearer ` and let the user supply just the key.
-  Obot applies the prefix using its existing header handling before sending
-  the request to the container; no separate credential mapping is needed.
-- **Header forwarding:** read only the explicitly configured credential headers
-  from the current MCP request and send the same names and values to the target
-  API, including any prefix already applied by Obot. Do not rename headers,
-  add the prefix again, transform values, or convert credentials to query
-  parameters or cookies. Direct tools and call_tool use the same path.
+- **Credential ownership:** the catalog defines header inputs. At vMCP creation,
+  the author chooses `fixed` or `userAllowed` for each required input. Obot
+  already sends user-allowed values on MCP requests and applies configured
+  prefixes, such as `Bearer ` for an `Authorization` header. Supporting fixed
+  values for this hosted container requires Obot to send them on MCP requests
+  as well. Neither kind of value goes into container environment variables.
+- **Header forwarding (new wrapper behavior):** the wrapper reads only declared
+  credential headers from each MCP request and sends the same names and values
+  to the target REST API. It does not add a prefix or transform values. Direct
+  tools and call_tool use the same forwarding path.
 - **Isolation:** never mutate shared HTTP-client headers or reuse another
   request's credential. Reject missing required keys. Do not forward arbitrary
   client headers or Obot's login token. Send API credentials only to the
@@ -285,9 +276,10 @@ never fall back to an unfiltered server after a configuration error.
 - Without search, verify vMCP enforces direct tool restrictions and FastMCP
   exclusions are rejected. With search, verify excluded operations cannot be
   found or called through either invocation path.
-- Test concurrent users with different keys through one shared container in
-  both modes. Verify each API request uses the correct credential and missing
-  keys cannot reuse another user's key.
+- Test concurrent users with different user-allowed keys through one shared
+  container in both modes. Verify each API request uses the correct credential
+  and missing keys cannot reuse another user's key. Also verify fixed keys reach
+  the API without appearing in container environment variables.
 - Cover Obot's existing prefix behavior, including headers without a prefix
   and avoiding duplicate prefixes for values that already contain one.
 - Use local APIs for repeatable tests and a public API for optional live smoke
