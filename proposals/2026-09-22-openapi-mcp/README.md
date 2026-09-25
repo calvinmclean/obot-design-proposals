@@ -63,8 +63,8 @@ every valid specification is supported.
 
 ### Creating catalog entries
 
-- **UI:** select **Hosted**, then the new **OpenAPI** runtime. Upload an OpenAPI
-  file or provide a specification URL. These are mutually exclusive sources.
+- **UI:** select **OpenAPI** as the catalog entry type. Upload an OpenAPI file or
+  provide a specification URL. These are mutually exclusive sources.
 - **API destination:** show the base URL resolved from the specification and
   allow an explicit `baseURL` override. Require an override if the specification
   has no usable server URL. The override controls API requests, not where Obot
@@ -79,8 +79,8 @@ every valid specification is supported.
   definition, but never secret values. Exact field names remain for review.
 
 Both paths use the same import validation and store the actual specification
-internally in Obot, not just its URL or declared version. The new OpenAPI runtime is a catalog configuration option
-backed by the existing container deployment infrastructure, not a new hosting
+internally in Obot, not just its URL or declared version. The `openapi` runtime
+is backed by the existing container deployment infrastructure, not a new hosting
 backend. Authors do not need to configure a container image or command.
 
 ### Container setup
@@ -266,7 +266,7 @@ never fall back to an unfiltered server after a configuration error.
 
 ## Testing and validation
 
-- Verify Hosted/OpenAPI creation through the UI and equivalent GitOps imports,
+- Verify OpenAPI entry creation through the UI and equivalent GitOps imports,
   source validation, and base URL overrides.
 - Cover replacement uploads, URL refresh, unchanged content, and fetch failures.
   Verify every GitOps sync imports the schema, including changes at the same URL
